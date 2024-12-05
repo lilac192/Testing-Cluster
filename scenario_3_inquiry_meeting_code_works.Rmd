@@ -1,0 +1,718 @@
+---
+title: "Scenario 5: Preliminary simulation results for estimating the joint distribution function of two time-to-event variables (Realistic Data setting (instead of theoretical/updated to be the true interval))"
+author: "Whitney Su"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document:
+    highlight: tango
+  word_document: default
+urlcolor: blue
+---
+
+```{r include = FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,                 # don't show code
+  warning = FALSE,              # don't show warnings
+  message = TRUE,              # don't show messages (less serious warnings)
+  cache = FALSE,                # set to TRUE to save results from last compilation
+  fig.align = "center",         # center figures
+  attr.source = '.numberLines'  # add line numbers to code
+)
+
+library(tidyverse)
+library(CVXR)
+library(splines2)  
+library(knitr)
+library(abind)
+library(ggplot2)
+library(dplyr)
+library(data.table)# load libraries you always use here
+set.seed(27)             # make random results reproducible
+```
+
+```{r}
+f1<-function(lamb,x)  1-exp(-lamb*x)
+
+pr<-function(alph, lamb, mu, x, y)
+{
+   t<-((f1(lamb,x))^(1-alph)+(f1(mu,y))^(1-alph)-1)
+   s<-t^(alph/(1-alph))
+   w<-(f1(lamb,x))^(-alph)
+   s*w
+}
+dpr<-function(alph,lamb,mu,x,y)
+{
+   t<-((f1(lamb,x))^(1-alph)+(f1(mu,y))^(1-alph)-1)
+   s<-t^((2*alph-1)/(1-alph))
+   w<-((f1(lamb,x))^(-alph))*((f1(mu,y))^(-alph))*(mu*exp(-mu*y))
+   alph*s*w
+}
+```
+
+```{r}
+#set parameters here
+alph = 6
+lamb = 0.5
+mu = 1.8
+size = 1000 
+```
+
+Notes on the following data generation code: 
+
+Filtering for "Left": The first filter removes rows where ind2_vector is "Left" and either event_time_1 or censoring_times is less than new_U.
+
+Filtering for "Right": The second filter removes rows where ind2_vector is "Right" and either event_time_1 or censoring_times is less than new_V.
+
+Handling "Interval":
+
+The mutate function updates ind2_vector to "Right" if either event_time_1 or censoring_times is between new_U and new_V.
+It also sets new_V to infinity in those cases.
+Final Filter for "Interval": The last filter removes rows where ind2_vector is still "Interval" and either event_time_1 or censoring_times is less than new_U.
+
+
+```{r}
+generating_sheets <- function(thing){
+  
+	{
+		t1<-rep(0, size)
+		
+		z1<-rep(0, size)
+		s2<-rep(0, size)
+		for(i in 1:size)
+		{ 
+			x<-rexp(1, lamb)
+			z<-runif(1,0,1)
+			err<-1
+			y0<-0
+			y1<-x
+			k2<-0
+			while(err>10^(-6)&k2<30)
+			{
+				y0 <- y1
+				y1 <- y0-(pr(alph,lamb,mu,x,y0)-z)/ dpr(alph, lamb,mu,x,y0)
+				if (y1<=0)
+				  y1<-0.1
+				err<-abs((y1-y0)/y0)
+				k2=k2+1
+			} 
+			if(k2==30)
+			{
+			  ini=0.05
+			  while(k2==30)
+			  {
+				err<-1
+				y0<-0
+				y1<-ini
+						 k2<-0
+				while(err>10^(-6)&k2<30)
+				{
+				  y0<-y1
+				  y1<-y0-(pr(alph,lamb,mu,x,y0)-z)/ dpr(alph, lamb,mu,x,y0)
+				  if (y1<=0)
+					y1<-0.1
+				  err<-abs((y1-y0)/y0)
+				  k2=k2+1
+				} 
+				ini=ini+0.05
+			  } 
+			}   
+			t1[i]<-x
+			z1[i]<-z
+			s2[i]<-y1   
+		}
+	}
+	
+
+bivariate_event_times <- cbind(t1=t1,s2=s2)
+bivariate_event_times <- as.data.frame(bivariate_event_times)
+event_time_1 <- bivariate_event_times$t1
+censoring_times_T <- runif(size, 0.0201, 4.7698) #increasing the upper value of the uniform distribution increases the number of observed while decreasing the number of unobserved
+#censoring_times_T <- runif(size, 0.0201, 9.2103) #values at the 1st and 99th percentile of the Exp(0.5) distribution
+Xi <- pmin(bivariate_event_times$t1, censoring_times_T)
+T1 <- (cbind(event_time_1, censoring_times_T, Xi = pmin(event_time_1, censoring_times_T), T1_ind = ifelse(event_time_1 < censoring_times_T, "observed", "unobserved")))
+
+
+
+
+
+  tu<-rep(0,size)
+  tv<-rep(0,size)
+  
+  k<-1
+  while(k<=size)
+  {
+	int1<-runif(1,0.0201,4.7698)
+	int2<-runif(1,0.0201,4.7698)
+	
+	if (abs(int2-int1)>0.05) 
+	{
+		tu[k]<-min(int1,int2)
+		tv[k]<-max(int1,int2)
+
+		k<-k+1
+	}
+  }
+  
+table_event_2 <- cbind(tu = tu, tv = tv, s = bivariate_event_times$s2)
+ind2_vector <- ifelse(table_event_2[,3] < table_event_2[,1], "Left", ifelse(table_event_2[,3] < table_event_2[,2], "Interval", "Right"))
+T2 <- cbind(table_event_2, ind2_vector)
+
+
+T1 <-as.data.frame(T1)
+T2 <- as.data.frame(T2)
+G1 <- cbind(T1, T2)
+#making columns numeric
+G1$event_time_1 <- as.numeric(G1$event_time_1)
+G1$censoring_times_T <- as.numeric(G1$censoring_times_T)
+G1$Xi <-as.numeric(G1$Xi)
+####
+G1$tu <- as.numeric(G1$tu)
+G1$tv <- as.numeric(G1$tv)
+G1$s <- as.numeric(G1$s)
+
+G1<- as.data.frame(G1)
+
+
+G1 <- G1 %>%
+  mutate(
+    new_U = case_when(
+      ind2_vector == "Right" ~ tv,
+      ind2_vector == "Left" ~ 0,
+      ind2_vector == "Interval" ~ tu,
+      TRUE ~ NA_real_
+    ),
+    new_V = case_when(
+      ind2_vector == "Right" ~ Inf,
+      ind2_vector == "Left" ~ tu,
+      ind2_vector == "Interval" ~ tv,
+      TRUE ~ NA_real_
+    )
+  )
+
+
+G1 <- G1 %>%
+  rowwise() %>%
+  mutate(
+    min_time = min(event_time_1, censoring_times_T),
+    final_lowerbound = case_when(
+      # Case for "Left"
+      ind2_vector == "Left" & min_time < new_V ~ 0.0001,
+      ind2_vector == "Left" & min_time >= new_V ~ new_U,
+      # Case for "Interval"
+      ind2_vector == "Interval" & min_time < new_U ~ 0.0001,
+      ind2_vector == "Interval" & min_time >= new_U & min_time <= new_V ~ new_V,
+      ind2_vector == "Interval" & min_time > new_V ~ new_U,
+      # Case for "Right"
+      ind2_vector == "Right" & min_time < new_U ~ 0.0001,
+      ind2_vector == "Right" & min_time >= new_U ~ new_U
+    ),
+    final_upperbound = case_when(
+      # Case for "Left"
+      ind2_vector == "Left" & min_time < new_V ~ Inf,
+      ind2_vector == "Left" & min_time >= new_V ~ new_V,
+      # Case for "Interval"
+      ind2_vector == "Interval" & min_time < new_U ~ Inf,
+      ind2_vector == "Interval" & min_time >= new_U & min_time <= new_V ~ Inf,
+      ind2_vector == "Interval" & min_time > new_V ~ new_V,
+      # Case for "Right"
+      ind2_vector == "Right" & min_time < new_U ~ Inf,
+      ind2_vector == "Right" & min_time >= new_U ~ new_V
+    )
+  ) %>%
+  ungroup() %>%
+  select(-min_time)
+
+G1 <- na.omit(G1) 
+
+G1 <- G1 %>%
+select(-tu, -tv, -new_U, -new_V, -ind2_vector) #delete the intermediate columns of data
+
+G1 <- G1 %>% 
+  mutate(censoring_type = case_when(
+    final_lowerbound == 0 ~ "Left",
+    final_upperbound == Inf ~ "Right",
+    TRUE ~ "Interval"
+  ))
+
+
+G1 <- G1 %>%
+  mutate(
+    u_value = case_when(
+      censoring_type == "Interval" ~ final_lowerbound,
+      censoring_type == "Right" ~ final_lowerbound,  #-0.0001,
+      censoring_type == "Left" ~ final_upperbound,
+      TRUE ~ NA_real_  # Default case if needed
+    ),
+    v_value = case_when(
+      censoring_type == "Interval" ~ final_upperbound,
+      censoring_type == "Right" ~ final_lowerbound,
+      censoring_type == "Left" ~ final_upperbound,  #+ 0.0001,
+      TRUE ~ NA_real_  # Default case if needed
+    )
+  ) %>% head(200)
+
+return(G1)
+
+
+}
+
+```
+
+
+
+
+```{r}
+sheets <- (lapply(1:150,generating_sheets))
+#generating_sheets(thing)
+```
+
+
+
+```{r}
+
+G1_new_get_knots_2 <- function(sheetnumber, int.k_1 = NULL, int.k_2 = NULL) {
+
+  if (is.null(int.k_1)) {
+    int.k_1 <- round(dim(sheetnumber)[1]^(1/3))  # [1] gives the number of rows since T1 is a table.
+  }
+
+  if (is.null(int.k_2)) {
+    int.k_2 <- round(dim(sheetnumber)[1]^(1/3))  # Same as above for T2.
+  }
+
+  # Process knot_pre_1
+  knot_pre_1 <- c(sheetnumber$Xi)
+  knot_pre_1 <- knot_pre_1[is.finite(knot_pre_1)]  # Keep only finite values.
+  knot_pre_1 <- knot_pre_1[knot_pre_1 > 0]         # Keep only positive values.
+  knot_pre_1 <- unique(knot_pre_1)                 # Remove duplicates.
+
+  # Process knot_pre_2
+  knot_pre_2 <- c(sheetnumber$u_value, sheetnumber$v_value) # Combine u and v values to generate knots.
+  # knot_pre_2 <- c(sheetnumber$new_U, sheetnumber$new_V)   # Uncomment if you want to switch to new_U and new_V.
+  knot_pre_2 <- knot_pre_2[is.finite(knot_pre_2)]  # Keep only finite values.
+  knot_pre_2 <- knot_pre_2[knot_pre_2 > 0]         # Keep only positive values.
+  knot_pre_2 <- unique(knot_pre_2)                 # Remove duplicates.
+
+  # Calculate quantiles
+  pos1 <- quantile(knot_pre_1, seq(0, 1, length.out = int.k_1), names = FALSE)
+  pos2 <- quantile(knot_pre_2, seq(0, 1, length.out = int.k_2), names = FALSE)
+
+  # Create the output list with knots and boundaries
+  knot <- list(
+    knot1 = pos1[2:(length(pos1) - 1)],  # Exclude first and last quantile.
+    knot2 = pos2[2:(length(pos2) - 1)],  # Exclude first and last quantile.
+    boundary1 = c(max(0, pos1[1] - 0.5), pos1[length(pos1)] + 0.5),  # Add buffer to the boundaries.
+    boundary2 = c(max(0, pos2[1] - 0.5), pos2[length(pos2)] + 0.5)   # Add buffer to the boundaries.
+  )
+
+  return(knot)
+}
+
+```
+
+
+
+```{r}
+knots_sheets <- lapply(sheets, G1_new_get_knots_2)
+```
+
+
+```{r}
+# Combine each data frame in `list_of_dfs` with the corresponding list in `list_of_lists`
+result <- Map(function(df, list_df) {
+  list(DataFrame = df, List = list_df)
+}, sheets, knots_sheets)
+
+```
+
+#A demonstration using the u_values extracted from a data table 
+```{r, results='hide'}
+iSpline((result[[1]]$DataFrame$u_value), knots=result[[1]]$List$knot2, Boundary.knots=result[[1]]$List$boundary2, degree=5-2, intercept=T) #Question about NAs
+```
+
+
+### Inputs to generate splines are values extracted from the data table; knots are dependent on the simulated values in each data sheet, so knot values differ across the different data tables generated
+
+
+```{r}
+G1_OptLogLik_myversion_playing <- function(G1, l,  p_n, q_n) {
+  Ms.xi = suppressWarnings(mSpline(G1$DataFrame$Xi, knots=G1$List$knot1, Boundary.knots=G1$List$boundary1, degree=l-2, intercept=T)) 
+  Is.xi = suppressWarnings(iSpline(G1$DataFrame$Xi, knots=G1$List$knot1, Boundary.knots=G1$List$boundary1, degree=l-2, intercept=T)) 
+  Is.u2 = suppressWarnings(iSpline((G1$DataFrame$u_value), knots=G1$List$knot2, Boundary.knots=G1$List$boundary2, degree=l-2, intercept=T)) 
+  Is.v2 = suppressWarnings(iSpline((G1$DataFrame$v_value), knots=G1$List$knot2, Boundary.knots=G1$List$boundary2, degree=l-2, intercept=T)) 
+
+
+  LogLikBivar_myversion <- function(Mu, w, p) {
+    
+  # Part 1: observed + left
+    I1 = G1$DataFrame$T1_ind == "observed" & G1$DataFrame$censoring_type =="Left"
+    if (sum(I1) == 0) {
+      total_part1 = 0
+    } else{
+      Time_1 = Ms.xi[I1, , drop = FALSE]
+      U2 = Is.u2[I1, , drop = FALSE] 
+    
+     total_part1 = sum(log(diag(Time_1 %*% Mu %*% t(U2)))) 
+
+    }
+    
+
+
+    #Part 2: observed + interval
+    I2 = G1$DataFrame$T1_ind == "observed" & G1$DataFrame$censoring_type =="Interval"
+    if (sum(I2) == 0) {
+      total_part2 = 0
+    } else{
+      Time_1 = Ms.xi[I2, , drop = FALSE]
+      V2= Is.v2[I2, , drop = FALSE]
+      U2 = Is.u2[I2, , drop = FALSE]
+
+      total_part2 = sum(log(diag(Time_1 %*% Mu %*% t(V2-U2))))
+    }
+
+    #Part 3: observed + right
+
+    I3 = G1$DataFrame$T1_ind == "observed" & G1$DataFrame$censoring_type=="Right"
+    if (sum(I3) == 0) {
+      total_part3 = 0
+    } else{
+      Time_1 = Ms.xi[I3, , drop = FALSE]
+      V2= Is.v2[I3, , drop = FALSE]
+
+      total_part3 = sum(log(diag(Time_1 %*% Mu %*% t(matrix(1, nrow(V2),ncol(V2)) -  V2)) - Time_1%*%p))
+    }
+
+    #Part 4: censored + left
+    I4 = G1$DataFrame$T1_ind == "unobserved" & G1$DataFrame$censoring_type =="Left"
+    if (sum(I4) == 0) {
+      total_part4 = 0
+    } else{
+      Time_1 = Is.xi[I4, , drop = FALSE]
+      U2 = Is.u2[I4, , drop = FALSE]
+
+      total_part4 = sum(log(diag(U2%*%t(Mu) %*%t(matrix(1, nrow = nrow(Time_1), ncol = ncol(Time_1)) - Time_1)) + U2%*%w))
+    }
+
+    #Part 5:  censored + interval
+    I5 = G1$DataFrame$T1_ind == "unobserved" & G1$DataFrame$censoring_type =="Interval"
+    if (sum(I5) == 0) {
+      total_part5 = 0
+    } else{
+      V2 = Is.v2[I5, , drop = FALSE]
+      Xi1 = Is.xi[I5, , drop = FALSE]
+      U2 = Is.u2[I5, , drop = FALSE]
+      total_part5 = sum(log((diag(V2%*%t(Mu)%*%t(matrix(1, nrow(Xi1), ncol(Xi1)))) + V2%*%w) - (diag(Xi1 %*% Mu %*% t(V2))) - (diag(U2%*%t(Mu)%*%t(matrix(1, nrow(Xi1), ncol(Xi1)))) + U2%*%w) + (diag(Xi1 %*% Mu %*% t(U2)))))
+}
+
+ # Part 6: censored & right
+    I6 = G1$DataFrame$T1_ind =="unobserved" & G1$DataFrame$censoring_type=="Right"
+    if (sum(I6)==0) {
+      total_part6  = 0
+    } else {
+      V2 = Is.v2[I6, , drop = FALSE]
+      Xi1 = Is.xi[I6, , drop = FALSE]
+      total_part6 = sum(log(1 - (diag(Xi1 %*% Mu %*% t(matrix(1,nrow =nrow(V2), ncol = ncol(V2)))) + Xi1%*%p)-(diag(V2 %*% t(Mu) %*% t(matrix(1, nrow=nrow(Xi1), ncol = ncol(Xi1)))) + V2%*%w) + (diag(Xi1 %*% Mu %*% t(V2)))))
+
+    }
+
+       return(total_part1 + total_part2 + total_part3 + total_part4 + total_part5 + total_part6)
+  
+   
+    }
+  
+  
+  
+  Mu = CVXR::Variable(p_n, q_n)
+  w  = CVXR::Variable(q_n)
+  p  = CVXR::Variable(p_n)
+  objective <- Minimize(-LogLikBivar_myversion(Mu, w, p))
+  Opt.Problem <- Problem(objective, list(Mu >= 0, w>=0, p>=0, sum(Mu) + sum(w) + sum(p) - 1 <= 0 ))
+  CVXR_result <- solve(Opt.Problem)
+  #print(CVXR_result)
+  CVXR_result$status
+
+
+
+
+  seive.M_ij = as.matrix(CVXR_result$getValue(Mu)); seive.M_ij[which(seive.M_ij<0,arr.ind = T)] = 0
+   seive.w_i  = as.matrix(CVXR_result$getValue(w)); seive.w_i[seive.w_i<0] = 0
+   seive.p_j  = as.matrix(CVXR_result$getValue(p)); seive.p_j[seive.p_j<0] = 0
+   return(list( seive.M_ij=seive.M_ij, seive.w_i=seive.w_i, seive.p_j=seive.p_j))
+  
+
+  }
+
+```
+
+
+```{r}
+# Initialize a vector to store the indices of errors
+error_indices <- integer(0)
+
+# Apply the function with error handling
+storing_matrices_Mwp <- lapply(seq_along(result), function(i) {
+  tryCatch({
+    # Access the current item using the index 'i'
+    G1_item <- result[[i]]
+    
+    # Try to call the function and return the result
+    G1_OptLogLik_myversion_playing(G1_item, l = 5, p_n = 8, q_n = 8)
+  }, error = function(e) {
+    # In case of error, print the error message and the index of the failed item
+    cat("Error occurred for item at index", i, ":", conditionMessage(e), "\n")
+    
+    # Store the index of the failed item
+    error_indices <<- c(error_indices, i)
+    
+    # Return NULL (or any default value you prefer for failed cases)
+    return(NULL)
+  })
+})
+
+# Filter out NULL results (successful optimization results)
+storing_matrices_Mwp <- storing_matrices_Mwp[!sapply(storing_matrices_Mwp, is.null)]
+
+#storing_matrices_Mwp
+# Print out the indices of the items that caused errors
+if(length(error_indices) > 0) {
+  cat("Errors occurred at the following indices:", error_indices, "\n")
+} else {
+  cat("No errors occurred.\n")
+}
+
+
+```
+
+```{r}
+error_indices
+# error_indices contains the indices of the items that failed
+# result is the original list of data frames (before optimization)
+# storing_matrices_Mwp is the list of successful results
+
+# Exclude the items from result that correspond to the indices in error_indices
+#result_filtered <- result[-error_indices]
+result_filtered <- result
+#result_filtered
+```
+
+```{r}
+# Now, apply the Map function to the filtered lists
+result_all <- Map(function(df, list_df) {
+  list(List_of_table_knots = df, list_sieve_outputs = list_df)
+}, result_filtered, storing_matrices_Mwp)
+
+# result_all will now contain the corresponding pairs of dataframes and sieve outputs
+result_all <- result_all
+```
+
+
+
+```{r}
+my_function <- function(item){
+  T1.seq = sort(c(seq(0, 5.23, length.out = 50))) #use something like this, instead of the Time sequence dependent on each data table/sheet. #automate the 
+  
+  T2.seq = sort(c(seq(0, 5.17, length.out = 50)))
+  
+  i.T1   = iSpline(T1.seq, knots=item$List_of_table_knots$List$knot1, Boundary.knots=item$List_of_table_knots$List$boundary1, degree=5-2, intercept=T)
+  i.T2   = iSpline(T2.seq, knots=item$List_of_table_knots$List$knot2, Boundary.knots=item$List_of_table_knots$List$boundary2, degree=5-2, intercept=T)
+  
+  i.T1.col = matrix(rep(i.T1,each=length(T2.seq)),ncol=dim(i.T1)[2], byrow = F)   
+  
+  i.T2.row = apply(i.T2, 2, rep, length(T1.seq)) 
+  
+  
+   F12.hat  = sapply(seq(nrow(i.T1.col)), function(x) sum(tcrossprod(i.T1.col[x,], i.T2.row[x,]) * item$list_sieve_outputs$seive.M_ij)) 
+   F12.hat = matrix(F12.hat, length(T1.seq), length(T2.seq), byrow = T) 
+  
+  F1.hat   = i.T1%*%(item$list_sieve_outputs$seive.M_ij%*%matrix(1,8,1) + item$list_sieve_outputs$seive.p_j) 
+  F2.hat   = i.T2%*%(t(item$list_sieve_outputs$seive.M_ij)%*%matrix(1,8,1) + item$list_sieve_outputs$seive.w_i) 
+  
+  return(list(F12.hat = F12.hat, F1.hat = F1.hat, F2.hat = F2.hat))
+  }
+```
+
+```{r}
+storing_Fhats_list <-lapply(result_all, my_function)
+
+```
+
+```{r}
+
+# Extract matrices
+matrices <- lapply(storing_Fhats_list, function(x) x[[1]])
+
+# Combine matrices into a 3-dimensional array
+array_of_matrices <- abind(matrices, along=3)
+
+# Calculate the average of each element across all matrices
+average_matrix_F12 <- apply(array_of_matrices, c(1, 2), mean)
+
+# Print the result
+#print(average_matrix_F12) #averaging number of matrices
+```
+
+
+```{r}
+
+# Code that works 
+
+# Define the list of lists
+
+# Extract vectors
+vectors <- lapply(storing_Fhats_list, function(x) x[[2]])
+
+# Combine vectors into a matrix
+matrix_of_vectors <- do.call(cbind, vectors)
+
+# Calculate the average of each column
+average_vector_F1 <- rowMeans(matrix_of_vectors)
+
+# Print the result
+print(average_vector_F1) #averaging 150
+
+```
+
+```{r}
+#Similar averaging of F2 
+
+
+# Extract vectors
+vectors <- lapply(storing_Fhats_list, function(x) x[[3]])
+
+# Combine vectors into a matrix
+matrix_of_vectors <- do.call(cbind, vectors)
+
+# Calculate the average of each column
+average_vector_F2 <- rowMeans(matrix_of_vectors)
+
+# Print the result
+print(average_vector_F2) #averaging 130
+
+```
+
+
+```{r}
+result_four <- Map(function(df, list_df) {
+  list(List_of_three = df, list_of_Fhats = list_df)
+}, result_all, storing_Fhats_list)
+
+#Print the result
+#result_four
+```
+
+
+
+
+```{r}
+# Testing F1 distribution on the average over 100 data sets
+# Define the function
+function1 <- function(x) { 1 - exp(-0.5 * x) }
+
+# Generate x values
+x <- seq(
+  0,
+  5.23,
+  length.out = 50
+)
+
+# Compute y values
+y1 <- function1(x)
+y2 <- average_vector_F1
+
+# Plot two lines on the same graph with title
+plot(
+  x, y1, type = "l", col = "blue", ylim = c(0, max(y2)),
+  xlab = "t1", ylab = "F(t1)", main = "Theoretical vs Empirical Function for F(t1): tested on 150 data tables"
+)
+lines(x, y2, col = "red")
+
+# Add legend
+legend("topleft", legend = c("Theoretical", "Empirical"), col = c("blue", "red"), lty = 1)
+
+
+
+```
+
+```{r}
+#Testing F2 distribution on the average over 100 data sets
+function1 <- function(x) { 1 - exp(-1.8 * x) }
+
+# Generate x values
+x <- seq(
+  0,
+  5.17,
+  length.out = 50
+)
+
+# Compute y values
+y1 <- function1(x)
+y2 <- average_vector_F2
+
+# Plot two lines on the same graph with title
+plot(
+  x, y1, type = "l", col = "blue", ylim = c(0, max(y2)),
+  xlab = "t2", ylab = "F(t2)", main = "Theoretical vs Empirical CDF for F(t2): tested on 150 data tables"
+)
+lines(x, y2, col = "red")
+
+# Add legend
+legend("topleft", legend = c("Theoretical", "Empirical"), col = c("blue", "red"), lty = 1)
+
+```
+```{r}
+
+  T1.seq = sort(c(seq(0, 4, length.out = 50)))
+  
+  T2.seq = sort(c(seq(0, 5.16, length.out = 50)))
+```
+
+```{r}
+#The theoretical joint distribution? Needs checking 
+
+f <- function(x, y) {
+    ((1 - exp(-0.5 * x))^(-5) - (1 - exp(-1.8 * y))^(-5) - 1)^(-1/5) 
+  
+}
+
+
+
+# Define range and resolution
+x_range <- seq(0, 6.03, length.out = 50)
+y_range <- seq(0, 4.73, length.out = 50)
+
+# Create grid
+grid <- expand.grid(x = x_range, y = y_range)
+
+# Evaluate the function at each grid point
+z_values <- with(grid, f(x, y))
+
+# Reshape the result into a matrix
+z_matrix <- matrix(z_values, nrow = length(x_range), ncol = length(y_range), byrow = TRUE)
+
+#z_matrix[40:50,]
+
+
+
+
+
+```
+
+
+```{r}
+
+#increase sample size and number of observations per table. 
+
+ #dev.new()
+  layout(matrix(c(1,1,1, 2,2,3,3), nrow = 1))
+  persp(T1.seq, T2.seq, average_matrix_F12 - z_matrix, xlab = 'T1', ylab = 'T2', zlab = 'F(T1, T2)', main='Joint CDF', theta = -35, phi = 20, ticktype = 'detailed') #plot the difference (Fhat-F0) (tho the theoretical here needs checking)
+  plot(T1.seq, average_vector_F1, col = "black",ylim = c(0,1), type = "l", lwd = 2,  xlab = "T1", ylab = "F(T1)", main = 'Marginal CDF of event 1')
+  plot(T2.seq, average_vector_F2, col = "black",ylim = c(0,1), type = "l",lwd = 2, xlab = "T2", ylab = "F(T2)", main = 'Marginal CDF of event 2')
+```
+
+
+# Code
+
+```{r ref.label = knitr::all_labels(), echo = TRUE, eval = FALSE}
+# this R markdown chunk generates a code appendix
+```
